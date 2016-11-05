@@ -46,8 +46,8 @@ void LoadFromFile(void)
     FreeLibrary(handle);
 }
 
-void* ReadLibrary(long* pSize) {
-    long read;
+void* ReadLibrary(size_t* pSize) {
+    size_t read;
     void* result;
     FILE* fp;
 
@@ -59,8 +59,8 @@ void* ReadLibrary(long* pSize) {
     }
 
     fseek(fp, 0, SEEK_END);
-    *pSize = ftell(fp);
-    if (*pSize < 0)
+    *pSize = static_cast<size_t>(ftell(fp));
+    if (*pSize == 0)
     {
         fclose(fp);
         return NULL;
@@ -75,7 +75,7 @@ void* ReadLibrary(long* pSize) {
     fseek(fp, 0, SEEK_SET);
     read = fread(result, 1, *pSize, fp);
     fclose(fp);
-    if (read != static_cast<size_t>(*pSize))
+    if (read != *pSize)
     {
         free(result);
         return NULL;
@@ -87,7 +87,7 @@ void* ReadLibrary(long* pSize) {
 void LoadFromMemory(void)
 {
     void *data;
-    long size;
+    size_t size;
     HMEMORYMODULE handle;
     addNumberProc addNumber;
     HMEMORYRSRC resourceInfo;
@@ -195,7 +195,7 @@ void InitFreeFunc(CallList* calls, CustomFreeFunc freeFunc) {
 	calls->current_free_call = 0;
 }
 
-void TestFailingAllocation(void *data, long size) {
+void TestFailingAllocation(void *data, size_t size) {
     CallList expected_calls;
     HMEMORYMODULE handle;
 
@@ -214,7 +214,7 @@ void TestFailingAllocation(void *data, long size) {
     assert(expected_calls.current_free_call == 0);
 }
 
-void TestCleanupAfterFailingAllocation(void *data, long size) {
+void TestCleanupAfterFailingAllocation(void *data, size_t size) {
     CallList expected_calls;
     HMEMORYMODULE handle;
     int free_calls_after_loading;
@@ -238,7 +238,7 @@ void TestCleanupAfterFailingAllocation(void *data, long size) {
     assert(expected_calls.current_free_call == free_calls_after_loading);
 }
 
-void TestFreeAfterDefaultAlloc(void *data, long size) {
+void TestFreeAfterDefaultAlloc(void *data, size_t size) {
     CallList expected_calls;
     HMEMORYMODULE handle;
     int free_calls_after_loading;
@@ -257,10 +257,59 @@ void TestFreeAfterDefaultAlloc(void *data, long size) {
     assert(expected_calls.current_free_call == free_calls_after_loading + 1);
 }
 
+#ifdef _WIN64
+
+LPVOID MemoryAllocHigh(LPVOID address, SIZE_T size, DWORD allocationType, DWORD protect, void* userdata)
+{
+    int* counter = static_cast<int*>(userdata);
+    if (*counter == 0) {
+        // Make sure the image gets loaded to an address above 32bit.
+        uintptr_t offset = 0x10000000000;
+        address = (LPVOID) ((uintptr_t) address + offset);
+    }
+    (*counter)++;
+    return MemoryDefaultAlloc(address, size, allocationType, protect, NULL);
+}
+
+void TestAllocHighMemory(void *data, size_t size) {
+    HMEMORYMODULE handle;
+    int counter = 0;
+    addNumberProc addNumber;
+    HMEMORYRSRC resourceInfo;
+    DWORD resourceSize;
+    LPVOID resourceData;
+    TCHAR buffer[100];
+
+    handle = MemoryLoadLibraryEx(
+        data, size, MemoryAllocHigh, MemoryDefaultFree, MemoryDefaultLoadLibrary,
+        MemoryDefaultGetProcAddress, MemoryDefaultFreeLibrary, &counter);
+
+    assert(handle != NULL);
+
+    addNumber = (addNumberProc)MemoryGetProcAddress(handle, "addNumbers");
+    _tprintf(_T("From memory: %d\n"), addNumber(1, 2));
+
+    resourceInfo = MemoryFindResource(handle, MAKEINTRESOURCE(VS_VERSION_INFO), RT_VERSION);
+    _tprintf(_T("MemoryFindResource returned 0x%p\n"), resourceInfo);
+
+    resourceSize = MemorySizeofResource(handle, resourceInfo);
+    resourceData = MemoryLoadResource(handle, resourceInfo);
+    _tprintf(_T("Memory resource data: %ld bytes at 0x%p\n"), resourceSize, resourceData);
+
+    MemoryLoadString(handle, 1, buffer, sizeof(buffer));
+    _tprintf(_T("String1: %s\n"), buffer);
+
+    MemoryLoadString(handle, 20, buffer, sizeof(buffer));
+    _tprintf(_T("String2: %s\n"), buffer);
+
+    MemoryFreeLibrary(handle);
+}
+#endif  // _WIN64
+
 void TestCustomAllocAndFree(void)
 {
     void *data;
-    long size;
+    size_t size;
 
     data = ReadLibrary(&size);
     if (data == NULL)
@@ -274,6 +323,10 @@ void TestCustomAllocAndFree(void)
     TestCleanupAfterFailingAllocation(data, size);
     _tprintf(_T("Test custom free function after MemoryLoadLibraryEx\n"));
     TestFreeAfterDefaultAlloc(data, size);
+#ifdef _WIN64
+    _tprintf(_T("Test allocating in high memory\n"));
+    TestAllocHighMemory(data, size);
+#endif
 
     free(data);
 }
